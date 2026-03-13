@@ -1,0 +1,703 @@
+---
+title: "DS 805 - Final Project"
+author: "Peyton Ramsey"
+format:
+  html:
+    embed-resources: true
+    self-contained-math: true
+execute: 
+  echo: true
+  warning: true
+---
+
+# Source:
+
+https://archive.ics.uci.edu/dataset/697/predict+students+dropout+and+academic+success
+
+# Data dictionary
+
+This dataset covers 4,424 students from a Portuguese higher education institution from several academic years. Each record includes the student's background at enrollment like demographic info, financial situation, and macroeconomic conditions at the time. It also has first and second semester academic results. The target variable y is binary, Dropout (1) vs. Graduate or Enrolled (0), collapsed from the original three-class outcome.
+
+**Key variables:** 
+
+- Target (y): Dropout (1) vs. Graduate/Enrolled (0), the outcome we are predicting
+
+- Age.at.enrollment: Student's age when they started school
+
+- Curricular.units.1st.sem.approved: Courses passed in the first semester
+
+- Curricular.units.2nd.sem.approved: Courses passed in the second semester
+
+- Tuition.fees.up.to.date: Whether tuition is currently paid (1 = yes)
+
+- Scholarship.holder: Whether the student holds a scholarship (1 = yes)
+
+- Debtor: Whether the student carries debt with the institution (1 = yes)
+
+- Gender: Student gender (1 = male, 0 = female)
+
+- Marital.status: Encoded marital status category
+
+- GDP: Gross domestic product at the time of enrollment
+
+- Unemployment.rate: National unemployment rate at enrollment 
+
+- Inflation.rate: Inflation rate at enrollment
+
+> Grades follow the Portuguese 0–20 scale; roughly, 10 is the minimum passing level (~2.0 US GPA), 14 reflects solid performance (~3.0), and 18–20 corresponds to excellence (~4.0).
+
+> Admission grades are reported on a Portuguese 0–200 scale (essentially a 0–20 school grade ×10). For intuition, dividing by 10 and using 18–20 = ~A (4.0), 14–17 = ~B/C (3.0–2.0), and 10–13 = ~D (1.0) provides an approximate U.S. 4.0 GPA equivalent.
+
+# Part One:
+
+## Business goal and target definition:
+
+**Business goal:** Can we predict which students enrolled in higher education are at risk of dropping out, so that academic advisors can intervene early with targeted support before it's too late?
+
+**Y definition:** The original dataset contains three outcome classes: Graduate, Enrolled, and Dropout. For this project, y is collapsed into a binary variable where Dropout = 1 (the negative/at-risk class) and Graduate or Enrolled = 0 (the positive class). This framing is justified because the actionable business concern is identifying students who will not complete their program , whether a student eventually graduates or is still progressing are both acceptable outcomes from an intervention standpoint
+
+**Predict why it matters:** Student dropout represents a significant and costly consequence for both the university and the student because universities lose tuition revenue and funding tied to retention rates, while students lose time, money, and career momentum. Early prediction identification of at-risk students allows advisors, financial aid offices, and counseling services to target these students to help them maintain their schooling, such as academic coaching, emergency financial assistance, or course load adjustments. The cost of missing a true dropout (a false negative) is substantially higher than the cost of a false alarm because an unnecessary advising check-in wastes minimal resources, whereas a missed at-risk student may withdraw permanently. Because intervention opportunities narrow sharply after the first semester, a model that maximizes negative-class recall, catching as many true dropouts as possible, directly aligns with the university's retention goals. This makes dropout prediction not just an academic exercise but a deployable tool for student success programs.
+
+## Classification threshold
+
+Because the cost of missing a true dropout is more costly than a false alarm, we will evaluate our models using both classification thresholds of 0.5 (the standard threshold) and 0.3 (a more aggresive threshold). This will allow us to fairly compare each model to achieve our goal of maximizing dropout detection. A threshold of 0.3 is used to increase recall by making the model more sensitive at the cost of increasing false positives, this fits our goal because we want to get the maximum true dropout prediction possible. In our case, missing a negative case (false negative) is very costly as it can have consequences for both the university and the student. The threshold of 0.5 is the default, but it can result in low recall when the positive class is imbalanced. 
+
+## Data quality checks
+
+```{r}
+#| output: false
+library(caret)
+library(dplyr)
+library(kableExtra)
+library(MASS)
+library(class)
+library(ggplot2)
+library(tree)
+library(randomForest)
+library(e1071)
+```
+
+```{r}
+df <- read.csv("C:/Users/ramse/msba-courses/ds 805/project/data.csv", sep = ";")
+
+head(df)
+str(df)
+```
+
+**Missingness**
+```{r}
+# checking if there are missing values in dataset
+n_rows <- nrow(df)
+n_rows
+
+n_complete <- sum(complete.cases(df)) 
+n_complete
+```
+
+**Convert all categorical predictors to factors**
+
+```{r}
+cat_vars <- c(
+  "Marital.status",
+  "Application.mode",
+  "Application.order",
+  "Course",
+  "Daytime.evening.attendance.",
+  "Previous.qualification",
+  "Nacionality",
+  "Mother.s.qualification",
+  "Father.s.qualification",
+  "Mother.s.occupation",
+  "Father.s.occupation",
+  "Displaced",
+  "Educational.special.needs",
+  "Debtor",
+  "Tuition.fees.up.to.date",
+  "Gender",
+  "Scholarship.holder",
+  "International"
+)
+
+df[cat_vars] <- lapply(df[cat_vars], as.factor)
+```
+
+## Exploratory analysis
+
+```{r}
+# create binary target: Dropout = 1, Graduate/Enrolled = 0
+df$y <- ifelse(df$Target == "Dropout", 1, 0)
+df$y <- factor(df$y, levels = c(0, 1), labels = c("Not Dropout", "Dropout"))
+```
+
+```{r}
+# numeric plot 1: admission grade by dropout status
+ggplot(df, aes(x = y, y = Admission.grade, fill = y)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Admission Grade by Dropout Status",
+       x = "Outcome", y = "Admission Grade") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# numeric plot 2: 1st semester grade by dropout status
+ggplot(df, aes(x = Curricular.units.1st.sem..grade., fill = y)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "1st Semester Grade Distribution by Dropout Status",
+       x = "1st Semester Grade", y = "Density", fill = "Outcome") +
+  theme_minimal()
+
+# categorical plot 1: tuition fees up to date vs dropout
+ggplot(df, aes(x = Tuition.fees.up.to.date, fill = y)) +
+  geom_bar(position = "fill") +
+  labs(title = "Dropout Rate by Tuition Fees Status",
+       x = "Tuition Fees Up to Date (0 = No, 1 = Yes)",
+       y = "Proportion", fill = "Outcome") +
+  theme_minimal()
+
+# categorical plot 2: scholarship holder vs dropout
+ggplot(df, aes(x = Scholarship.holder, fill = y)) +
+  geom_bar(position = "fill") +
+  labs(title = "Dropout Rate by Scholarship Status",
+       x = "Scholarship Holder (0 = No, 1 = Yes)",
+       y = "Proportion", fill = "Outcome") +
+  theme_minimal()
+
+```
+
+It's important to note that the grading scales differ between Portugal and the U.S (where this data is sourced), so an admission grade shown in the plot ranges from 0-200, a 100 is a D, and a 200 is an A. The GPA follows the same pattern, 10 is a D, 14 is a B, 20 is an A. Now, as shown in the boxplot, students who have slightly lower admission grade (median around 122) are more likely to dropout than students who didn't drop out (median around 128), however this is a small difference indicating it may be a weak predictor. In the density plot, we see that a large amount of dropout students earn a zero for their graded first-semester coursework, as there are two peaks, one around zero and the other around 12. As for non-dropout students, there is a large peak at 13, suggesting this could be a good predictor. Now looking at the tuition fees bar chart, we see that whether a student is up-to-date on their tuition payments is a good predictor of a student dropping out. We see that around 85% of students who aren't caught up on tuition fees, are more likely to drop out, versus 25% of dropouts who are caught up on tuition payments. In the dropout rate by scholarship status, we see that around ~40% of students without scholarship end up dropping out, compared to 12.5% of students who have scholarship end up dropping out. These patterns suggest that tuition fee status and first-semester grades should be prioritized as predictors, as they show the clearest separation between dropout and non-dropout students. 
+
+## Train/test split
+
+We should do a stratified sample because our 'y' is binary and likely imbalanced because there isn't a 50/50 split for dropout students and non-drop out students. If we don't apply stratification, our test set could under-represent the dropout class which makes our negative-class recall unreliable. Our goal of capturing dropouts requires a balanced set of dropouts and non-dropouts.  
+
+```{r}
+# set a seed to train/test data
+set.seed(31)
+train_idx <- createDataPartition(df$y, p = 0.8, list = FALSE)
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+# training set rows
+n_train <- nrow(train)
+n_train
+
+# testing set rows
+n_test  <- nrow(test)
+n_test
+
+# training set distribution
+print(prop.table(table(train$y)))
+
+# testing set distribution
+print(prop.table(table(test$y)))
+```
+
+# Part Two
+
+```{r}
+# Majority class classifier
+majority_class <- names(which.max(table(train$y)))
+
+baseline_pred <- factor(rep(majority_class, nrow(test)), levels = levels(test$y))
+
+baseline_cm <- confusionMatrix(baseline_pred, test$y, positive = "Dropout")
+baseline_cm
+
+```
+
+```{r}
+log_model <- glm(y ~ Tuition.fees.up.to.date + Curricular.units.1st.sem..grade. + Scholarship.holder + Debtor + Admission.grade, data = train, family = "binomial")
+
+summary(log_model)
+
+log_pred_prob <- predict(log_model, newdata = test, type = "response")
+
+# threshold of 0.5
+log_pred_050 <- ifelse(log_pred_prob > 0.5, "Dropout", "Not Dropout")
+log_pred_050 <- factor(log_pred_050, levels = levels(test$y))
+log_cm_050 <- confusionMatrix(log_pred_050, test$y, positive = "Dropout")
+log_cm_050
+
+# threshold of 0.3
+log_pred_030 <- ifelse(log_pred_prob > 0.3, "Dropout", "Not Dropout")
+log_pred_030 <- factor(log_pred_030, levels = levels(test$y))
+log_cm_030 <- confusionMatrix(log_pred_030, test$y, positive = "Dropout")
+log_cm_030
+
+# test error rate
+1 - log_cm_050$overall["Accuracy"]
+1 - log_cm_030$overall["Accuracy"]
+
+# negative-class recall
+log_cm_050$byClass["Sensitivity"]
+log_cm_030$byClass["Sensitivity"]
+```
+
+**Which predictors we chose:** We chose five predictors based off of the EDA plots from above. Starting with Tuition.fees.up.to.date, it was chosen because it's the strongest categorical predictor from the bar chart. Curricular.units.1st.sem..grade had the strongest numeric predictor from the density plot. Scholarship.holder had the second strongest categorical predictor. Debtor was chosen because it relates to the financial instability we saw in dropouts. Lastly, Admission.grade was chosen because to see if this is a strong predictor, although we didn't see that visually in the boxplot.
+
+**Interpretation:** All five of the predictors are statistically significant (p < 0.01) which backs-up our analyses made during the EDA. Logistic regression earned an Accuracy of 0.8303 and a test error rate of 16.97%, about half the Baseline model's error rate of 32.13%. The negative-class recall rose from 0% to 59.51%, meaning that the logistic model was able to correctly predict about 6/10 true dropout students. We see that first-semester grades are a powerful predictor, each additional grade reduces the log-odds of dropping out by 0.197, showing that lower grades early on reflect academic disengagement. Although Debtor carries the weakest signal of the five predictors (p = 0.0012), it still adds information beyond tuition status, a student may be current on this semester's fees but still carry debt from prior semesters, capturing a distinct dimension of financial distress. By lowering the threshold to 0.3, it increases negative-class recall from 59.51% to 67.25%, capturing ~7/10 true dropouts, however speicificity drops from 94.17% to 88.83% and test error rises from 16.97% to 18.1%. Given our goal of maximizing missed dropouts, the 0.3 threshold is the better choice for logistic regression as the gain in predicting tru dropouts is greater than the loss in true negatives.While the model performs well, it provides a conservative prediction on true dropouts with a specificity of 94.17% versus sensitivity of 59.51%. Because false negatives are cost-heavy, a lower classification threshold could be explored to improve dropout recall. 
+
+# Part 3
+
+KNN measures distance between observations, so predictors on larger raw scales would dominate the distance calculation. Rather than scaling manually, we use caret's `preProcess = c("center", "scale")` inside `train()`, which standardizes features correctly within each cross-validation fold (fitting the scaler on the training fold only, then applying it to the validation fold). This avoids data leakage that can occur when scaling the full dataset up front.
+
+```{r}
+# Subset to numeric predictors only, KNN cannot use factor columns
+train_knn <- train %>% 
+  dplyr::select(where(is.numeric)) %>% 
+  mutate(y = train$y)
+
+test_knn <- test %>% 
+  dplyr::select(where(is.numeric)) %>% 
+  mutate(y = test$y)
+
+# k selection 10-fold repeated cross-validation, repeating 3 times
+set.seed(31)
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+knnFit <- train(y ~ ., data = train_knn,  method = "knn", trControl = ctrl, preProcess = c("center", "scale"), tuneLength = 20)
+
+knnFit
+plot(knnFit)
+
+# Best k chosen by caret
+cat("Best k:", knnFit$bestTune$k, "\n")
+
+# Get predicted probabilities
+knn_pred_prob <- predict(knnFit, newdata = test_knn, type = "prob")[, "Dropout"]
+
+# Threshold = 0.50 (explicit)
+knn_pred_050 <- factor(ifelse(knn_pred_prob >= 0.50, "Dropout", "Not Dropout"), levels = levels(test_knn$y))
+knn_cm_050 <- confusionMatrix(knn_pred_050, test_knn$y, positive = "Dropout")
+
+# Threshold = 0.30
+knn_pred_030 <- factor(ifelse(knn_pred_prob >= 0.30, "Dropout", "Not Dropout"), levels = levels(test_knn$y))
+knn_cm_030 <- confusionMatrix(knn_pred_030, test_knn$y, positive = "Dropout")
+
+# Compare
+knn_threshold_comparison <- data.frame(
+  Threshold = c("0.50", "0.30"),
+  Error_Rate = c(round(1 - knn_cm_050$overall["Accuracy"], 4), round(1 - knn_cm_030$overall["Accuracy"], 4)),
+  Neg_Class_Recall = c(round(knn_cm_050$byClass["Sensitivity"], 4), round(knn_cm_030$byClass["Sensitivity"], 4)),
+  Specificity = c(round(knn_cm_050$byClass["Sensitivity"], 4), round(knn_cm_030$byClass["Sensitivity"], 4))
+)
+knn_threshold_comparison
+```
+
+**Interpretation:** Using 10-fold cross-validation, we found the optimal k to be 15, achieving a test error rate of 14.37% and a negative-class recall of 61.97% at the 0.5 threshold level, a minor improvement over logistic regression's recall of 59.51%. This suggests the numeric feature space (grades, age, enrollment patterns) contains some non-linear structure that KNN can capture better than a linear decision boundary. By lowering the threshold to 0.3, it increases the negative-class recall from 61.97% to 76.06%, but specificity drops from 96.83% to 84.5%, and the test error rate rises from 14.37% to 18.21%. Our goal of minimizing missed true dropouts gives us the justification to accept the 0.3 threshold as the better choice for KNN, as the ~14% gain in negative-class recall offsets the cost of increase in false alarms. A key limitation is that KNN only accepts numeric predictors, meaning the categorical variables we identified as strong predictors in the EDA, tuition fee status and scholarship status, cannot be included, which likely holds back its recall performance. KNN also provides no coefficients or variable importance output, making it difficult to explain which features drive individual predictions to advisors or administrators.
+
+# Part 4: Tree-based model
+
+We chose Random Forest because it can capture non-linear interactions and uses all predictors, while maintaining good interpretability. Our goal is to predict which predictors matter most for predicting true dropouts. RF also handles categorical variables well, while subsampling at each split for each variables. We will tune two parameters, 'mtry' (features considered at each split) and `ntree` (number of trees). 
+
+**Finding and Tuning `mtry` & 'ntree'**
+
+```{r}
+# exclude original Target string column to avoid leakage
+train_rf <- train[, !names(train) %in% "Target"]
+test_rf <- test[, !names(test)  %in% "Target"]
+
+# tune mtry parameter in RF model
+set.seed(31)
+tuneRF_result <- tuneRF(x = train_rf[, !names(train_rf) %in% "y"], y = train_rf$y, ntreeTry = 500, stepFactor = 1.5, improve = 0.01, trace = TRUE, plot = TRUE)
+
+# identify best mtry parameter value
+best_mtry <- tuneRF_result[which.min(tuneRF_result[, 2]), 1]
+cat("Best mtry:", best_mtry, "\n")
+
+# identifying best ntree parameter value, went back to line 301 to justify inputting 500
+set.seed(31)
+rf_ntree_check <- randomForest(y ~ ., data = train_rf, mtry = best_mtry, ntree = 1000)
+plot(rf_ntree_check, main = "OOB Error vs Number of Trees")
+```
+
+Identified the best mtry value is 4 because it has the lowest OOB Error of 0.1332, and found the best ntree value is 500, because by looking at the plot we see that the black line (the overall OOB Error) flattens out around 500, showing that it captures nearly all the improvements on the Dropout class (green line) without wasting unnecessary computation on trees.
+
+**Fit final Random Forest**
+
+```{r}
+set.seed(31)
+model_rf <- randomForest(y ~ ., data = train_rf, mtry = best_mtry, ntree = 500, importance = TRUE)
+
+print(model_rf)
+```
+
+**Evaluate on test set**
+
+```{r}
+pred_rf <- predict(model_rf, newdata = test_rf, type = "class")
+
+cm_rf <- confusionMatrix(pred_rf, test_rf$y, positive = "Dropout")
+cm_rf
+
+ter_rf <- round(1 - cm_rf$overall["Accuracy"], 4)
+rf_recall <- round(cm_rf$byClass["Sensitivity"], 4)
+cat("RF test error rate:", ter_rf, "\n")
+cat("RF negative-class recall:", rf_recall, "\n")
+```
+
+**Threshold comparison: 0.5 vs 0.3**
+
+```{r}
+# get predicted probabilities from RF
+pred_rf_prob <- predict(model_rf, newdata = test_rf, type = "prob")[, "Dropout"]
+
+# threshold = 0.50 
+pred_rf_050 <- factor(ifelse(pred_rf_prob >= 0.50, "Dropout", "Not Dropout"), levels = levels(test_rf$y))
+cm_rf_050 <- confusionMatrix(pred_rf_050, test_rf$y, positive = "Dropout")
+
+# threshold 0.30
+pred_rf_030 <- factor(ifelse(pred_rf_prob >= 0.30, "Dropout", "Not Dropout"), levels = levels(test_rf$y))
+cm_rf_030 <- confusionMatrix(pred_rf_030, test_rf$y, positive = "Dropout")
+
+# compare side by side
+threshold_comparison <- data.frame(
+  Threshold = c("0.50", "0.30"),
+  Error_Rate = c(round(1 - cm_rf_050$overall["Accuracy"], 4), round(1 - cm_rf_030$overall["Accuracy"], 4)),
+  Neg_Class_Recall = c(round(cm_rf_050$byClass["Sensitivity"], 4), round(cm_rf_030$byClass["Sensitivity"], 4)),
+  Specificity = c(round(cm_rf_050$byClass["Sensitivity"], 4), round(cm_rf_030$byClass["Sensitivity"], 4))
+)
+threshold_comparison
+```
+
+Given our stakeholder goal of correctly identifying a true dropout, because it's more costly to miss a dropout than an unncessary advisor check in, a threshold of 0.3 is a better choice. A threshold of 0.3 resulted in a negative-class recall of 89.44%, so around 9 out of 10 students will correctly be identified, but it drops ~16 points in specificity, going from 94.5% (threshold of 0.5) to 78.67%, however this is justified because having a more aggresive classification threshold at expense of a lower precision is acceptable in our domain because falsely identifying a non-dropout student to dropout just means an advisor has a conversation with a student, far less costly than not flagging a true dropout. 
+
+**Variable importance**
+
+```{r}
+#| fig.height: 12
+#| fig-width: 10
+varImpPlot(model_rf, main = "Random Forest Variable Importance")
+```
+
+**Interpretation:** Cross-validating over 'mtry' values of 3, 6, 9, and 12 using OOB error at 300 trees produced an output for the lowest OOB error (13.14%) at 'mtry' = 3. The final model used 'ntree' = 500, with an error rate of 13.45%. While using the test set, RF achieved an accuracy of 89.48% with a test error rate of 10.52%, and a negative class recall of 78.87%, beating the logistic and KNN models greatly. Looking at the Variable Importance chart, we see that `Curricular.units.2nd.sem..approved.` and `Curricular.units.2nd.sem..grade.` rank first by both MeanDecreaseAccuracy and MeanDecreaseGini, with `Tuition.fees.up.to.date` close behind it, which backs up our claims made during EDA. RF does take away from interpretability because we cannot read a single coefficient to see its significance. This unfortunately, makes it harder to interpret to stakeholders who want a specific answer, but this improves our ability to capture the true dropout, because our gain in negative class recall is greater than logistic regression's, we are okay with losing some interpretability, while the Variable Importance plot provides a cushion to interpret our results. 
+
+# Part 5
+
+```{r}
+# exclude original Target column to avoid data leakage
+train_svm <- train[, !names(train) %in% "Target"]
+test_svm <- test[, !names(test)  %in% "Target"]
+
+set.seed(31)
+
+# tune over cost and gamma using 10-fold CV tune()
+svm_tune <- tune(svm, y ~ ., data = train_svm, kernel = "radial",  ranges = list(cost = c(0.1, 1, 10), gamma = c(0.01, 0.1, 0.5)), probability = TRUE)
+
+summary(svm_tune)
+svm_tune$best.parameters
+```
+
+```{r}
+# best model selected by tune()
+best_svm <- svm_tune$best.model
+
+# predict on test set (default 0.5)
+svm_pred <- predict(best_svm, newdata = test_svm)
+svm_cm <- confusionMatrix(svm_pred, test_svm$y, positive = "Dropout")
+svm_cm
+
+# threshold comparison
+svm_pred_prob <- attr(predict(best_svm, newdata = test_svm, probability = TRUE), "probabilities")[, "Dropout"]
+
+# threshold 0.50
+svm_pred_050 <- factor(ifelse(svm_pred_prob >= 0.50, "Dropout", "Not Dropout"), levels = levels(test_svm$y))
+svm_cm_050 <- confusionMatrix(svm_pred_050, test_svm$y, positive = "Dropout")
+
+# threshold 0.30
+svm_pred_030 <- factor(ifelse(svm_pred_prob >= 0.30, "Dropout", "Not Dropout"), levels = levels(test_svm$y))
+svm_cm_030 <- confusionMatrix(svm_pred_030, test_svm$y, positive = "Dropout")
+
+# comparing the thresholds
+svm_threshold_comparison <- data.frame(
+  Threshold = c("0.50", "0.30"),
+  Error_Rate = c(round(1 - svm_cm_050$overall["Accuracy"], 4), round(1 - svm_cm_030$overall["Accuracy"], 4)),
+  Neg_Class_Recall = c(round(svm_cm_050$byClass["Sensitivity"], 4), round(svm_cm_030$byClass["Sensitivity"], 4)),
+  Specificity = c(round(svm_cm_050$byClass["Sensitivity"], 4), round(svm_cm_030$byClass["Sensitivity"], 4))
+)
+svm_threshold_comparison
+```
+
+Using a radial-kernel SVM tuned over the cost parameters 0.1, 1, & 10, and gamma 0.01, 0.1, & 0.5, through a 10-fold cross-validation the optimal parameters were found to be cost = 10 and gamma = 0.01. The test set earned an accuracy of 88.80%, a test error rate of 11.20%, and a negative-class recall of 76.41% at a threshold of 0.5, slightly behind Random Forest. A cost of 10 means the model fits a tight boundary around the dropout class which that reduces false negatives. The gamma of 0.01 produces a wide and broadened kernel, preventing overfitting to noisy observations. By lowering the threhsold from 0.5 to 0.3, negative-class recall improves to 86.62% from 75.7%, test error rate improves from 11.31% to 10.86%, while specificity drops from 94.83% to 90.33%. This lower threshold is great for SVM because it improves recall and accuracy. SVM captures non-linear interactions unlike logistic regression and KNN which helps it to identify dropout students who have complex combinations of financial and academic troubles. However, a downside to using SVM is that it is harder to interpret, unlike Random Forest that shares the variable importance, SVM doesn't have a feature like this. But overall, SVM offers a strong balance of performance and flexibility, making it a good option when dropout and non-dropout classes are seperated well.  
+
+# Part 6
+
+```{r}
+comparison_table <- data.frame(
+  Model = c(
+    "Baseline (Majority Class)",
+    "Logistic Regression",
+    "KNN",
+    "Random Forest",
+    "SVM"
+  ),
+  Key_Tuning = c(
+    "Predict majority class (Not Dropout) for all observations",
+    "5 predictors: Tuition.fees.up.to.date, Curricular.units.1st.sem..grade., Scholarship.holder, Debtor, Admission.grade",
+    "k = 15 (10-fold repeated CV, 3 repeats). Only used numeric predictors only. Center + scale",
+    "mtry = 4 (tuned via OOB), ntree = 500, all predictors",
+    "Radial kernel, cost = 10, gamma = 0.01 (tuned via 10-fold CV)"
+  ),
+  Error_050 = paste0(round(c(
+    (1 - baseline_cm$overall["Accuracy"]) * 100,
+    (1 - log_cm_050$overall["Accuracy"]) * 100,
+    (1 - knn_cm_050$overall["Accuracy"]) * 100,
+    (1 - cm_rf_050$overall["Accuracy"]) * 100,
+    (1 - svm_cm_050$overall["Accuracy"]) * 100
+  ), 2), "%"),
+  Recall_050 = paste0(round(c(
+    baseline_cm$byClass["Sensitivity"] * 100,
+    log_cm_050$byClass["Sensitivity"] * 100,
+    knn_cm_050$byClass["Sensitivity"] * 100,
+    cm_rf_050$byClass["Sensitivity"] * 100,
+    svm_cm_050$byClass["Sensitivity"] * 100
+  ), 2), "%"),
+  Error_030 = paste0(c(
+    "—",
+    round((1 - log_cm_030$overall["Accuracy"]) * 100, 2),
+    round((1 - knn_cm_030$overall["Accuracy"]) * 100, 2),
+    round((1 - cm_rf_030$overall["Accuracy"]) * 100, 2),
+    round((1 - svm_cm_030$overall["Accuracy"]) * 100, 2)
+  ), c("", "%", "%", "%", "%")),
+  Recall_030 = paste0(c(
+    "—",
+    round(log_cm_030$byClass["Sensitivity"] * 100, 2),
+    round(knn_cm_030$byClass["Sensitivity"] * 100, 2),
+    round(cm_rf_030$byClass["Sensitivity"] * 100, 2),
+    round(svm_cm_030$byClass["Sensitivity"] * 100, 2)
+  ), c("", "%", "%", "%", "%")),
+  Takeaway = c(
+    "Predicts no dropouts and sets the performance floor.",
+    "Halves baseline error using five interpretable predictors, but a linear boundary limits recall.",
+    "Excluded categorical predictors cap its performance.",
+    "Non-linear splits over all predictors yield the highest dropout detection.",
+    "Captures complex interactions but offers no feature-importance output."
+  )
+)
+
+kbl(comparison_table,
+    col.names = c("Model", "Key Tuning Choices",
+                  "Error (0.5)", "Recall (0.5)",
+                  "Error (0.3)", "Recall (0.3)",
+                  "One-Sentence Takeaway"),
+    align = c("l", "l", "c", "c", "c", "c", "l")) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+```
+
+```{r}
+error_050_vals <- round(c(
+  (1 - baseline_cm$overall["Accuracy"]) * 100,
+  (1 - log_cm_050$overall["Accuracy"]) * 100,
+  (1 - knn_cm_050$overall["Accuracy"]) * 100,
+  (1 - cm_rf_050$overall["Accuracy"]) * 100,
+  (1 - svm_cm_050$overall["Accuracy"]) * 100
+), 2)
+
+neg_recall_050_vals <- round(c(
+  baseline_cm$byClass["Sensitivity"] * 100,
+  log_cm_050$byClass["Sensitivity"] * 100,
+  knn_cm_050$byClass["Sensitivity"] * 100,
+  cm_rf_050$byClass["Sensitivity"] * 100,
+  svm_cm_050$byClass["Sensitivity"] * 100
+), 2)
+
+error_030_raw <- c(
+  NA,
+  round((1 - log_cm_030$overall["Accuracy"]) * 100, 2),
+  round((1 - knn_cm_030$overall["Accuracy"]) * 100, 2),
+  round((1 - cm_rf_030$overall["Accuracy"]) * 100, 2),
+  round((1 - svm_cm_030$overall["Accuracy"]) * 100, 2)
+)
+
+neg_recall_030_raw <- c(
+  NA,
+  round(log_cm_030$byClass["Sensitivity"] * 100, 2),
+  round(knn_cm_030$byClass["Sensitivity"] * 100, 2),
+  round(cm_rf_030$byClass["Sensitivity"] * 100, 2),
+  round(svm_cm_030$byClass["Sensitivity"] * 100, 2)
+)
+
+# RF = index 4, SVM = index 5
+bold_model   <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+bold_e050    <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+bold_nr050   <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+bold_e030    <- c(FALSE, FALSE, FALSE, FALSE, TRUE)
+bold_nr030   <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+
+model_names <- c("Baseline (Majority Class)", "Logistic Regression", "KNN", "Random Forest", "SVM")
+fmt_model <- sapply(seq_along(model_names), function(i)
+  cell_spec(model_names[i], bold = bold_model[i]))
+
+fmt_e050 <- sapply(seq_along(error_050_vals), function(i)
+  cell_spec(paste0(error_050_vals[i], "%"), bold = bold_e050[i]))
+
+fmt_nr050 <- sapply(seq_along(neg_recall_050_vals), function(i)
+  cell_spec(paste0(neg_recall_050_vals[i], "%"), bold = bold_nr050[i]))
+
+fmt_e030 <- sapply(seq_along(error_030_raw), function(i) {
+  val <- if (is.na(error_030_raw[i])) "—" else paste0(error_030_raw[i], "%")
+  cell_spec(val, bold = bold_e030[i])
+})
+
+fmt_nr030 <- sapply(seq_along(neg_recall_030_raw), function(i) {
+  val <- if (is.na(neg_recall_030_raw[i])) "—" else paste0(neg_recall_030_raw[i], "%")
+  cell_spec(val, bold = bold_nr030[i])
+})
+
+summary_table <- data.frame(
+  Model         = fmt_model,
+  Error_050     = fmt_e050,
+  NegRecall_050 = fmt_nr050,
+  Error_030     = fmt_e030,
+  NegRecall_030 = fmt_nr030,
+  stringsAsFactors = FALSE
+)
+
+kbl(summary_table,
+    escape = FALSE,
+    col.names = c("Model", "Test Error (0.5)", "Neg-Class Recall (0.5)",
+                  "Test Error (0.3)", "Neg-Class Recall (0.3)"),
+    align = c("l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+```
+
+Random Forest is the clear winner based off both metrics and both thresholds, scoring the highest in negative-class recall at a threshold of 0.30 (89.79%) and 0.5 (79.23%), with a test error rate of 16.86% at 0.3 and 10.75% at 0.5, meaning it correctly identifies ~9 out of 10 true dropout students. It is important to mention that SVM had a lower test error rate at the 0.3 threshold (10.86%), but because our goal relies on achieving the highest negative-class recall, we cannot justify going with SVM since it has a slightly lower sensitivity of 86.62%. There's a steady progression from the baseline model, to logistic regression, to KNN showing improvements as the model gains more complexity. Then we see Random Forest and SVM battle for the top model. SVM loses to Random Forest because it is less interpretable, meaning it's harder to understand and see which variables are contributing to the model, and which fall short. Random Forest can tell stakeholders what variables are important and has better recall metrics, making it the model to use given our business priority.
+
+```{r}
+error_050_vals <- round(c(
+  (1 - baseline_cm$overall["Accuracy"]) * 100,
+  (1 - log_cm_050$overall["Accuracy"]) * 100,
+  (1 - knn_cm_050$overall["Accuracy"]) * 100,
+  (1 - cm_rf_050$overall["Accuracy"]) * 100,
+  (1 - svm_cm_050$overall["Accuracy"]) * 100
+), 2)
+
+neg_recall_050_vals <- round(c(
+  baseline_cm$byClass["Sensitivity"] * 100,
+  log_cm_050$byClass["Sensitivity"] * 100,
+  knn_cm_050$byClass["Sensitivity"] * 100,
+  cm_rf_050$byClass["Sensitivity"] * 100,
+  svm_cm_050$byClass["Sensitivity"] * 100
+), 2)
+
+error_030_raw <- c(
+  NA,
+  round((1 - log_cm_030$overall["Accuracy"]) * 100, 2),
+  round((1 - knn_cm_030$overall["Accuracy"]) * 100, 2),
+  round((1 - cm_rf_030$overall["Accuracy"]) * 100, 2),
+  round((1 - svm_cm_030$overall["Accuracy"]) * 100, 2)
+)
+
+neg_recall_030_raw <- c(
+  NA,
+  round(log_cm_030$byClass["Sensitivity"] * 100, 2),
+  round(knn_cm_030$byClass["Sensitivity"] * 100, 2),
+  round(cm_rf_030$byClass["Sensitivity"] * 100, 2),
+  round(svm_cm_030$byClass["Sensitivity"] * 100, 2)
+)
+
+# RF = index 4, SVM = index 5
+bold_e050    <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+bold_nr050   <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+bold_e030    <- c(FALSE, FALSE, FALSE, FALSE, TRUE)
+bold_nr030   <- c(FALSE, FALSE, FALSE, TRUE,  FALSE)
+
+fmt_e050 <- sapply(seq_along(error_050_vals), function(i)
+  cell_spec(paste0(error_050_vals[i], "%"), bold = bold_e050[i]))
+
+fmt_nr050 <- sapply(seq_along(neg_recall_050_vals), function(i)
+  cell_spec(paste0(neg_recall_050_vals[i], "%"), bold = bold_nr050[i]))
+
+fmt_e030 <- sapply(seq_along(error_030_raw), function(i) {
+  val <- if (is.na(error_030_raw[i])) "—" else paste0(error_030_raw[i], "%")
+  cell_spec(val, bold = bold_e030[i])
+})
+
+fmt_nr030 <- sapply(seq_along(neg_recall_030_raw), function(i) {
+  val <- if (is.na(neg_recall_030_raw[i])) "—" else paste0(neg_recall_030_raw[i], "%")
+  cell_spec(val, bold = bold_nr030[i])
+})
+
+summary_table <- data.frame(
+  Model        = c("Baseline (Majority Class)", "Logistic Regression", "KNN", "Random Forest", "SVM"),
+  Error_050    = fmt_e050,
+  NegRecall_050 = fmt_nr050,
+  Error_030    = fmt_e030,
+  NegRecall_030 = fmt_nr030,
+  stringsAsFactors = FALSE
+)
+
+kbl(summary_table,
+    escape = FALSE,
+    col.names = c("Model", "Test Error (0.5)", "Neg-Class Recall (0.5)",
+                  "Test Error (0.3)", "Neg-Class Recall (0.3)"),
+    align = c("l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+```
+
+```{r}
+prob_rf <- predict(model_rf, newdata = test_rf, type = "prob")
+
+test_analysis <- test_rf %>% 
+  mutate(
+    prob_dropout  = prob_rf[, "Dropout"],
+    uncertainty   = abs(prob_dropout - 0.5),
+    predicted     = pred_rf_030
+  ) %>%
+  arrange(uncertainty)
+
+worst10 <- test_analysis %>% slice_head(n = 10)
+
+worst10 %>%
+  dplyr::select(y, predicted, prob_dropout,
+         Tuition.fees.up.to.date, Curricular.units.2nd.sem..grade.,
+         Curricular.units.2nd.sem..approved., Scholarship.holder) %>%
+  mutate(prob_dropout = round(prob_dropout, 3)) %>%
+  kbl(col.names = c("Actual", "Predicted", "P(Dropout)",
+                    "Tuition Current", "2nd Sem Grade",
+                    "2nd Sem Approved", "Scholarship"),
+      align = c("l","l","c","c","c","c","c")) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+
+```
+
+The ten most uncertain predictions share a conflicting pattern, it's struggling to identify true dropouts when students are behind on tuition fees, but still attending class. These students are on the edge of the model, with some earning scholarship but behind on payments who dropout. Our model is having a hard time predicting the edge cases because there are two conflicting signals, a strong dropout signal and a strong retention signal. This blind spot of being unable to identify students in financial distress who are engaged in school would require more variables, like mid-semester payment updates or attendance records to provide supporting data to improve the model's visibility. 
+
+```{r}
+test_seg <- test_rf %>%
+  mutate(
+    predicted  = pred_rf_030,
+    attendance = ifelse(Daytime.evening.attendance. == "1", "Daytime", "Evening")
+  )
+
+seg_results <- test_seg %>%
+  group_by(attendance) %>%
+  summarise(
+    N            = n(),
+    Pct_Dropout  = round(mean(y == "Dropout") * 100, 1),
+    Error_Rate   = round(mean(predicted != y) * 100, 1),
+    Neg_Recall   = round(sum(predicted == "Dropout" & y == "Dropout") / sum(y == "Dropout") * 100, 1)
+  )
+
+seg_results %>%
+  kbl(col.names = c("Attendance Type", "N", "% Dropout", "Error Rate (%)", "Neg-Class Recall (%)"),
+      align = c("l","c","c","c","c")) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+
+```
+
+This segment robustness check is predicting to see how well the model performs to predict true dropouts for Daytime versus Evening attendance. This shows that Random Forest predicts well for both attendance types, Evening students have a higher dropout rate than Daytime attendance at 38.7% vs 31.2%. At the 0.30 threshold, error rates are similar between groups, 17.1% Daytime vs 15.1% Evening, meaning the model generates slightly fewer false alarms for Evening students. This could be due to the higher concentration of true dropouts in the Evening group, which produces stronger and more separable predictor signals at the lower threshold. Evening students also show higher negative-class recall, 92.7% vs 89.3%, meaning the model catches more of the true dropouts in the Evening group. This suggests that evening students have clearer predictor signals in the predictor variables, making it easier for the model to identify true dropouts, such as financial instability or lower engagement. If new data is involved, it could sway the metrics for evening attendance because of the limited observations. Going forward, it'd be important to collect more observations for Evening students. This would help us see if evening classes are truly more predictable for true dropouts, or if it is being swayed by a small segment size.
+
+# Part 7
+
+A student dropping out is a very costly occurence for both the university and the student, it's a loss of tuition, time, career momentum, and funding for the school. This project aimed to build and evaluaet five classification models on a dataset of 8,142 enrolled university studnets to predict and identify which students are at risk of dropping out before they do. We used negative-class recall, catching the true dropouts, as our key metric because the cost of missing a student about to dropout, outweighs the cost of an advisor reaching out to a student who won't dropout. Random Forest was the best model after comparing the baseline, logistic regression, KNN, and SVM models, it was able to correctly identify ~9 out of 10 students who will drop out. It used a mix of academic and financial signals to determine which variables matter most in predicting true dropouts. 
+
+**What we predicted:** Whether a student currently enrolled in university will dropout, a binary outcome (Dropout vs Graduate/Still enrolled).
+
+**What data the model uses:** The models uses student records including semester-academic performance (first semester, second semester, grades, grade improvement in units), tuition fee payment status, scholarship status, gender, parental university outcomes, and around ~30 more variables associated with demographic and academic history.
+
+**How well it performs:** The Random Forest model with a threshold of 0.3, achieves a 16.86% test error rate and a negative-class recall of 89.79%. This means the model correctly predicts 9 out of 10 students who will actually drop out are correctly identified.
+
+**Action recommendation:** Deploy the Random Forest model at threshold 0.3 at the end of each student's first semester to create a dropout risk score, that will flag students above the risk score. If above the risk threshold, academic advisors, financial aid advisors, or mentors will reach out to intervene, providing resources to students to hopefully help them in staying in school. 
+
+# Part 8
+
